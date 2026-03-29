@@ -3,6 +3,7 @@ import PropTypes from 'prop-types';
 import {
   Dimensions,
   InteractionManager,
+  Keyboard,
   Modal,
   TouchableWithoutFeedback,
   View,
@@ -119,6 +120,9 @@ class Tooltip extends Component {
     this.isMeasuringChild = false;
     this.interactionPromise = null;
     this.dimensionsSubscription = null;
+    this.keyboardSubscriptions = [];
+    this.keyboardRemeasureTimeout = null;
+    this.measurementGeneration = 0;
 
     this.childWrapper = React.createRef();
     this.state = {
@@ -146,6 +150,19 @@ class Tooltip extends Component {
       'change',
       this.updateWindowDims,
     );
+
+    // Re-measure anchor when keyboard opens/closes so tooltip stays aligned with the
+    // child (e.g. footer above KeyboardAvoidingView). Dimensions 'change' often does not
+    // fire for keyboard-driven layout.
+    const onKeyboardFrameChange = () => {
+      if (this.props.isVisible) {
+        this.scheduleRemeasureForKeyboard();
+      }
+    };
+    this.keyboardSubscriptions = [
+      Keyboard.addListener('keyboardDidShow', onKeyboardFrameChange),
+      Keyboard.addListener('keyboardDidHide', onKeyboardFrameChange),
+    ];
   }
 
   componentDidUpdate(prevProps, prevState) {
@@ -177,6 +194,18 @@ class Tooltip extends Component {
 
     if (this.interactionPromise) {
       this.interactionPromise.cancel();
+    }
+
+    this.keyboardSubscriptions.forEach(sub => {
+      if (sub && typeof sub.remove === 'function') {
+        sub.remove();
+      }
+    });
+    this.keyboardSubscriptions = [];
+
+    if (this.keyboardRemeasureTimeout != null) {
+      clearTimeout(this.keyboardRemeasureTimeout);
+      this.keyboardRemeasureTimeout = null;
     }
   }
 
@@ -211,6 +240,23 @@ class Tooltip extends Component {
 
     return null;
   }
+
+  scheduleRemeasureForKeyboard = () => {
+    if (!this.props.isVisible) {
+      return;
+    }
+    if (this.keyboardRemeasureTimeout != null) {
+      clearTimeout(this.keyboardRemeasureTimeout);
+    }
+    this.keyboardRemeasureTimeout = setTimeout(() => {
+      this.keyboardRemeasureTimeout = null;
+      this.setState({ windowDims: Dimensions.get('window') }, () => {
+        this.isMeasuringChild = false;
+        this.measurementGeneration += 1;
+        this.measureChildRect();
+      });
+    }, 120);
+  };
 
   updateWindowDims = dims => {
     this.setState(
@@ -265,6 +311,7 @@ class Tooltip extends Component {
   };
 
   measureChildRect = () => {
+    const generation = this.measurementGeneration;
     const doMeasurement = () => {
       if (!this.isMeasuringChild) {
         this.isMeasuringChild = true;
@@ -274,6 +321,9 @@ class Tooltip extends Component {
         ) {
           this.childWrapper.current.measure(
             (x, y, width, height, pageX, pageY) => {
+              if (generation !== this.measurementGeneration) {
+                return;
+              }
               const childRect = new Rect(pageX, pageY, width, height);
               if (
                 Object.values(childRect).every(value => value !== undefined)
